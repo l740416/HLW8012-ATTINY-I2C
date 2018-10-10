@@ -14,7 +14,7 @@
 
 // Firmware version
 #define VERSION_MAJOR                   1
-#define VERSION_MINOR                   1
+#define VERSION_MINOR                   2
 
 // General define
 #define TRUE    1
@@ -40,14 +40,19 @@
 #define CMD_SET_VOLTAGE_UPSTREAM_REG   0x10   // In :2B, UNIT: 0.1KOhm 
 #define CMD_SET_VOLTAGE_DOWNSTREAM_REG 0x11   // In :2B, UNIT: 0.1KOhm
 #define CMD_SET_CURRENT_REG            0x12   // In :2B, UNIT: 1.0mOhm
-#define CMD_SET_PULSE_TIMEOUT          0x13   // In :2B, UNIT: 1ms
-#define CMD_WRITE_COMMAND_LAST         0x13
+#define CMD_SET_EXPECT_VOLTAGE         0x13   // In :2B, UNIT: 0.01 V
+#define CMD_SET_EXPECT_CURRENT         0x14   // In :2B, UNIT: 0.001 A
+#define CMD_SET_EXPECT_POWER           0x15   // In :2B, UNIT: 0.01 W
+#define CMD_WRITE_COMMAND_LAST         0x15
 
 // I2C action commmands
 #define CMD_ACTION_COMMAND_FIRST       0x20
 #define CMD_UPDATE_REGISTERS           0x20
 #define CMD_PERFORM_MEASUREMENT        0x21
-#define CMD_ACTION_COMMAND_LAST        0x21
+#define CMD_CALIBRATE_VOLTAGE          0x22
+#define CMD_CALIBRATE_CURRENT          0x23
+#define CMD_CALIBRATE_POWER            0x24
+#define CMD_ACTION_COMMAND_LAST        0x24
 
 // HLW8012 parameters
 #define SEL_MEASURE_CURRENT LOW                         // SEL level to measure current
@@ -67,14 +72,20 @@
 // I2C input values
 // The order of the values is very IMPROTANT
 // It must follow the order of I2C write commmands
+const uint8_t NumWriteVarsIn2Byte = 6;
 struct input_t
 {
   uint16_t voltage_up_reg;
   uint16_t voltage_down_reg;
   uint16_t current_reg;
-  uint16_t pulse_timeout;
+  uint16_t expect_voltage;
+  uint16_t expect_current;
+  uint16_t expect_power;
   uint8_t  update_regs;
   uint8_t  perform_measurement;
+  uint8_t  calibrate_voltage;
+  uint8_t  calibrate_current;
+  uint8_t  calibrate_power;
 };
 
 // I2C output values
@@ -233,6 +244,24 @@ void loop()
     inputData.update_regs = FALSE;
   }
 
+  else if (inputData.calibrate_voltage == TRUE)
+  {
+    outputData.voltage_multiplier *= (10000.0 * (double) inputData.expect_voltage / (double) outputData.voltage);
+    inputData.calibrate_voltage = FALSE;
+  }
+
+  else if (inputData.calibrate_current == TRUE)
+  {
+    outputData.current_multiplier *= (1000.0 * (double) inputData.expect_current / (double) outputData.current);
+    inputData.calibrate_current = FALSE;
+  }
+
+  else if (inputData.calibrate_power == TRUE)
+  {
+    outputData.power_multiplier *= (10000.0 * (double) inputData.expect_power / (double) outputData.power);
+    inputData.calibrate_power = FALSE;
+  }
+
 #ifndef USE_WIRE
   TinyWireS_stop_check();
 #endif
@@ -273,8 +302,8 @@ void receiveEvent(uint8_t bytesReceived)
   }
   else if(receivedCommands[0] >= CMD_ACTION_COMMAND_FIRST && receivedCommands[0] <= CMD_ACTION_COMMAND_LAST)
   {
-    // there are 4 uint16_t value ahead of the action input variables (2 x uint8_t)
-    uint8_t* actionPtr = ((uint8_t*)((uint16_t*)(&inputData) + 4)) + (receivedCommands[0] - CMD_ACTION_COMMAND_FIRST);
+    // there are NumWriteVarsIn2Byte uint16_t value ahead of the action input variables (all uint8_t)
+    uint8_t* actionPtr = ((uint8_t*)((uint16_t*)(&inputData) + NumWriteVarsIn2Byte)) + (receivedCommands[0] - CMD_ACTION_COMMAND_FIRST);
     *actionPtr = TRUE;
   }
 
