@@ -14,7 +14,7 @@
 
 // Firmware version
 #define VERSION_MAJOR                   1
-#define VERSION_MINOR                   2
+#define VERSION_MINOR                   3
 
 // General define
 #define TRUE    1
@@ -33,7 +33,10 @@
 #define CMD_GET_POWER_MULTIPLIER       0x04   // Out:4B, UINT: uW/Hz
 #define CMD_GET_VOLTAGE_MULTIPLIER     0x05   // Out:4B, UNIT: uV/Hz
 #define CMD_GET_CURRENT_MULTIPLIER     0x06   // Out:4B, UNIT: uA/Hz
-#define CMD_READ_COMMAND_LAST          0x06
+#define CMD_GET_POWER_PULSEWIDTH       0x07   // Out:4B, UNIT: us
+#define CMD_GET_VOLTAGE_PULSEWIDTH     0x08   // Out:4B, UNIT: us
+#define CMD_GET_CURRENT_PULSEWIDTH     0x09   // Out:4B, UNIT: us
+#define CMD_READ_COMMAND_LAST          0x09
 
 // I2C write commmands
 #define CMD_WRITE_COMMAND_FIRST        0x10
@@ -63,7 +66,8 @@
 #define CURRENT_RESISTOR                0.004           // shunt register
 #define VOLTAGE_RESISTOR_UPSTREAM       ( 6 * 470000 )  // voltage divider upper stream
 #define VOLTAGE_RESISTOR_DOWNSTREAM     ( 1000 )        // voltage divider lower stream
-#define PULSE_TIMEOUT                   1000000         // Timeout after changing SEL singal, unit: us
+
+#define SEL_TOGGLE_TIMEOUT_MS           1000            // Toggle SEL singal, unit: ms
 
 #define V_REF               2.43                        // Internal voltage reference value
 #define F_OSC               3579000                     // Frequency of the HLW8012 internal clock
@@ -100,6 +104,9 @@ struct output_t
   uint32_t power_multiplier;     // Unit: uW/Hz
   uint32_t voltage_multiplier;   // Unit: uV/Hz
   uint32_t current_multiplier;   // Unit: uA/Hz
+  uint32_t power_pulse_width;    // Uint: us
+  uint32_t voltage_pulse_width;  // Uint: us
+  uint32_t current_pulse_width;  // Uint: us 
 };
 
 // HLW8012 pulse width readings
@@ -112,6 +119,8 @@ enum pulse_type
   PULSE_TYPE_NUM    
 };
 
+#define STABLE_PULSE_COUNT 32     // Start to measure pulse after 32 pluses
+#define ACCUMULATE_PULSE_COUNT 64 // Accumulate 64 pulses and then average it 
 struct reading_t
 {
   unsigned long pulse_width;        // Unit: us
@@ -125,11 +134,16 @@ input_t  inputData = {
   VOLTAGE_RESISTOR_UPSTREAM,
   VOLTAGE_RESISTOR_DOWNSTREAM,
   CURRENT_RESISTOR,
-  PULSE_TIMEOUT,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
   0,
   0
 };
-output_t outputData = {0, 0, 0 ,0 ,0 ,0, 0};
+output_t outputData = {0, 0, 0 ,0 ,0 ,0, 0 ,0 ,0, 0};
 reading_t measureData[PULSE_TYPE_NUM];
 byte SEL_signal;
 
@@ -167,13 +181,9 @@ inline void clear_readings()
 
 void clear_readings(pulse_type type)
 {
-  //for( int i = 0 ; i < 1; i++)
-  {
-    measureData[type].pulse_width = 0;
-    measureData[type].last_rising_edge = 0;
-  }
+  measureData[type].pulse_width = 0;
+  measureData[type].last_rising_edge = 0;
 }
-
 
 
 void setup()
@@ -207,32 +217,28 @@ void setup()
 
   init_HLW8012(CURRENT_RESISTOR, VOLTAGE_RESISTOR_UPSTREAM, VOLTAGE_RESISTOR_DOWNSTREAM);
 
-  // Setup CF_PIN, CF1_PIN interrupts
+  // Only set interrupt on power pin
+  // Use pulseIn for voltage/current pin
   cli();                                  // disable interrupts during setup
-  PCMSK |= (1 << PCINT3) | (1 << PCINT4); // external interrupt on PB3, PB4
+  PCMSK |= (1 << PCINT4); // external interrupt on PB4
   GIMSK |= (1 << PCIE);                   // enable PCINT interrupt in the general interrupt mask //SBI
   sei();                                  // last line of setup - enable interrupts after setup
 
 }
 
+unsigned long last_change_sel = 0;
+
 void loop()
 {
   if (inputData.perform_measurement == TRUE)
-  {   
-    
-    set_HLW8012_SEL(SEL_MEASURE_CURRENT);
-    clear_readings(PULSE_TYPE_CURRENT);
-    delay(1000);
-    set_HLW8012_SEL(SEL_MEASURE_VOLTAGE);
-    clear_readings(PULSE_TYPE_VOLTAGE);
-    delay(1000);
-    
+  {  
+    outputData.power_pulse_width = measureData[PULSE_TYPE_POWER].pulse_width;
+    outputData.voltage_pulse_width = measureData[PULSE_TYPE_VOLTAGE].pulse_width;
+    outputData.current_pulse_width = measureData[PULSE_TYPE_CURRENT].pulse_width;
+     
     outputData.power = (uint32_t) (outputData.power_multiplier * calc_frequency(PULSE_TYPE_POWER));
     outputData.voltage = (uint32_t) (outputData.voltage_multiplier * calc_frequency(PULSE_TYPE_VOLTAGE));
     outputData.current = (uint32_t) (outputData.current_multiplier * calc_frequency(PULSE_TYPE_CURRENT));
-    //outputData.power = (uint32_t) (outputData.power_multiplier);
-    //outputData.voltage = (uint32_t) (outputData.voltage_multiplier);
-    //outputData.current = (uint32_t) (outputData.current_multiplier);
     inputData.perform_measurement = FALSE;
   }
 
@@ -260,6 +266,40 @@ void loop()
   {
     outputData.power_multiplier *= (10000.0 * (double) inputData.expect_power / (double) outputData.power);
     inputData.calibrate_power = FALSE;
+  }
+
+  // calculate result if nothing to do
+  else
+  {
+    outputData.power_pulse_width = measureData[PULSE_TYPE_POWER].pulse_width;
+    outputData.voltage_pulse_width = measureData[PULSE_TYPE_VOLTAGE].pulse_width;
+    outputData.current_pulse_width = measureData[PULSE_TYPE_CURRENT].pulse_width;
+     
+    uint32_t power = (uint32_t) (outputData.power_multiplier * calc_frequency(PULSE_TYPE_POWER));
+    outputData.voltage = (uint32_t) (outputData.voltage_multiplier * calc_frequency(PULSE_TYPE_VOLTAGE));
+    outputData.current = (uint32_t) (outputData.current_multiplier * calc_frequency(PULSE_TYPE_CURRENT));
+
+    // discard bad reading, when power < 1W but current > 0.01A
+    if (!(power < 1000000 && outputData.current > 10000))
+    {
+      outputData.power = power; 
+    }
+  }
+
+  unsigned long t = millis();
+  if (t - last_change_sel > SEL_TOGGLE_TIMEOUT_MS)
+  {
+    last_change_sel = t;
+
+    if(SEL_signal == SEL_MEASURE_VOLTAGE)
+    {
+      measureData[PULSE_TYPE_VOLTAGE].pulse_width = pulseIn(CF1_PIN, HIGH) * 2;
+    }
+    else
+    {
+      measureData[PULSE_TYPE_CURRENT].pulse_width = pulseIn(CF1_PIN, HIGH) * 2;
+    }
+    set_HLW8012_SEL(!SEL_signal);   
   }
 
 #ifndef USE_WIRE
@@ -328,42 +368,18 @@ volatile uint8_t portbhistory = 0xFF;
 
 // interrupt handler
 ISR(PCINT0_vect)
-{
+{       
   unsigned long t = micros();
-  byte measureDataType = PULSE_TYPE_NULL;
-
-  uint8_t changedbits = changedbits = PINB ^ portbhistory;
+  uint8_t changedbits = PINB ^ portbhistory;
   portbhistory = PINB;
-
-  if(changedbits & (1 << PB3))
-  {
-    // CF1 signal
-    if(portbhistory & (1 << PB3))
-    {
-      if(SEL_signal == SEL_MEASURE_VOLTAGE)
-      {
-        measureDataType = PULSE_TYPE_VOLTAGE;
-      }
-      else
-      {
-        measureDataType = PULSE_TYPE_CURRENT;
-      }
-    }
-  }
 
   if(changedbits & (1 << PB4))
   {
     // CF signal
     if(portbhistory & (1 << PB4))
     {
-      measureDataType = PULSE_TYPE_POWER;
+      measureData[PULSE_TYPE_POWER].pulse_width = t - measureData[PULSE_TYPE_POWER].last_rising_edge;
+      measureData[PULSE_TYPE_POWER].last_rising_edge = t;
     }
   }
-
-  // The pulse width would be invalid if it is the first time level change detected
-  measureData[measureDataType].pulse_width = t - measureData[measureDataType].last_rising_edge;
-  measureData[measureDataType].last_rising_edge = t;
-
 }
-
-
